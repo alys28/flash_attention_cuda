@@ -22,7 +22,8 @@ __global__ matrix_multiply(int* A, int* B, int* out, int N){
 }
 
 
-__global_
+// BONUS: Tiled matmul with shared memory
+
 
 void test_add(int N, int block_size){
     int *A, *B, *out;
