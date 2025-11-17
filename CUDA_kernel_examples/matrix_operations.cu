@@ -1,9 +1,8 @@
-
 #include "cuda_common.cuh"
 #include <math.h>
 
 // Simple addition kernel
-__global__ vector_add(int* A, int* B, int* out, int N){
+__global__ void vector_add(int* A, int* B, int* out, int N){
     i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < N){ // Needed because CUDA will launch a number of threads equal to the multiple of the warp size, so potentially more than N.
         out[i] = A[i] + B[i];
@@ -12,13 +11,17 @@ __global__ vector_add(int* A, int* B, int* out, int N){
 
 
 // Exercise 1
-__global__ matrix_add(int* A, int* B, int* out, int N){
-
+__global__ void matrix_add(int* A, int* B, int* out, int N_x, int N_y){
+    int column = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (column < N_x && row < N_y){
+        out[row * N_x + column] = A[row * N_x + column] + B[row * N_x + column];
+    }
 }
 
 
 // Exercise 2
-__global__ matrix_multiply(int* A, int* B, int* out, int N){
+__global__ void matrix_multiply(int* A, int* B, int* out, int N){
 
 }
 
@@ -26,7 +29,42 @@ __global__ matrix_multiply(int* A, int* B, int* out, int N){
 // BONUS: Tiled matmul with shared memory
 
 
-void test_add(int N, int block_size){
+
+void test_matrix_add(int N_x, int N_y, int block_size_x, int block_size_y){
+    int *d_A, *d_B, *d_C;
+    int *h_A = malloc(sizeof(int) * N_x * N_y);
+    int *h_B = malloc(sizeof(int) * N_x * N_y);
+    int *h_C = malloc(sizeof(int) * N_x * N_y);
+
+    for (int i = 0; i < N_x * N_y; ++i){
+        h_A[i] = rand() % 100;
+        h_B[i] = rand() % 100;
+    }
+    int N = N_x * N_y;
+    cudaMalloc((void**)&d_A, sizeof(int) * N);
+    cudaMalloc((void**)&d_B, sizeof(int) * N);
+    cudaMalloc((void**)&d_C, sizeof(int) * N);
+    cudaMemcpy(d_A, h_A, sizeof(int) * N, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_B, h_B, sizeof(int) * N, cudaMemcpyHostToDevice);
+    
+
+    dim3 grid_size = dim3((N_x + block_size_x - 1) / block_size_x, N_y + block_size_y - 1) / block_size_y, 1)
+    dim3 block_size = dim3(block_size_x, block_size_y, 1)
+
+    matrix_add<<grid_size, block_size>>(d_A, d_B, d_out, N_x, N_y);
+    cudaMemcpy(h_C, d_C, sizeof(int) * N, cudaMemcpyDeviceToHost);
+
+    // Deallocate
+    cudaFree(d_A);
+    cudaFree(d_B);
+    cudaFree(d_out);
+
+    free(h_A);
+    free(h_B);
+    free(h_out);
+}
+
+void test_vector_add(int N, int block_size){
     int *d_A, *d_B, *d_out;
     int *h_A, *h_B, *h_out; 
     // Allocate on host (CPU)
@@ -35,8 +73,8 @@ void test_add(int N, int block_size){
     h_out = malloc(sizeof(int) * N);
     // Initialize arrays
     for (int i = 0; i < N; ++i){
-        h_A[i] = 1;
-        h_B[i] = 10;
+        h_A[i] = rand() % 100;
+        h_B[i] = rand() % 100;
     }
     // Allocate on device (GPU)
     cudaMalloc((void**)&d_A, sizeof(int) * N);
@@ -49,22 +87,19 @@ void test_add(int N, int block_size){
     int grid_size = (N + block_size - 1) / block_size;
     vector_add<<grid_size, block_size>>(d_A, d_B, d_out, N);
     // Get result on host
-    cudaMemcpy(h_C, d_C, sizeof(int) * N, cudaMemcpyDeviceToHost);
-    
+    cudaMemcpy(h_out, d_out, sizeof(int) * N, cudaMemcpyDeviceToHost);
 
     // Deallocate
-    cudaFree(d_a);
-    cudaFree(d_b);
+    cudaFree(d_A);
+    cudaFree(d_B);
     cudaFree(d_out);
 
-    free(A);
-    free(B);
-    free(out);
+    free(h_A);
+    free(h_B);
+    free(h_out);
 }
 
-
-
 int main(){
-    test_add(40, 3);
+    test_vector_add(40, 3);
 }
 
