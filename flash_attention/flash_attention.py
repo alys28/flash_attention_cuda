@@ -1,65 +1,7 @@
 import torch
 import triton
 import triton.language as tl
-
-
-
-@triton.jit
-def _attn_fwd(
-    Q,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM
-    K,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM
-    V,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM
-    softmax_scale,
-    M,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN
-    O,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM
-    stride_Q_batch,
-    stride_Q_head,
-    stride_Q_seq,
-    stride_Q_dim,
-    stride_K_batch,
-    stride_K_head,
-    stride_K_seq,
-    stride_K_dim,
-    stride_V_batch,
-    stride_V_head,
-    stride_V_seq,
-    stride_V_dim,
-    stride_O_batch,
-    stride_O_head,
-    stride_O_seq,
-    stride_O_dim,
-    BATCH_SIZE,
-    NUM_HEADS: tl.constexpr,
-    SEQ_LEN: tl.constexpr,
-    HEAD_DIM: tl.constexpr,
-    BLOCK_SIZE_Q: tl.constexpr,
-    BLOCK_SIZE_KV: tl.constexpr,
-    STAGE: tl.constexpr,
-):
-    idx_batch = tl.program_id(0)
-    idx_head = tl.program_id(1)
-    idx_q_block = tl.program_id(2)
-    # We have to go the amount of strides to reach the corresponding block within the head
-    base_offset = idx_batch * stride_Q_batch + idx_head * stride_Q_head # Get to the right batch, find the right head, you will have the sub matrix of shape (SEQ_LEN, HEAD_DIM)
-    q_block_ptr = tl.make_block_ptr(
-        base = Q + base_offset,
-        shape = (SEQ_LEN, HEAD_DIM),
-        strides = (stride_Q_seq, stride_Q_dim), 
-        offsets = (idx_q_block * BLOCK_SIZE_Q, 0), # Top left of our matrix basically, not a range, but rather coordinates
-        shape = (BLOCK_SIZE_Q, HEAD_DIM),
-        order = (1, 0) # We want the first dimension to have contiguous elements in memory
-    )
-    # # From scratch implementation of q_block_ptr:
-    # q_base = Q + base_offset
-    # offset_row = idx_q_block * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)
-    # offset_col = tl.arange(0, HEAD_DIM)
-    # q_ptrs = q_base + offset_row[:, None] * stride_Q_seq + offset_col[None, :] * stride_Q_dim
-    # mask = offset_row < SEQ_LEN
-
-    q = tl.load(q_block_ptr)
-
-    
-    
+from flash_attention.forward_kernel import _attn_fwd
 
 
 class TritonAttention(torch.autograd.Function):
