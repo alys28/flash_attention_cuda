@@ -5,12 +5,12 @@ import triton.language as tl
 
 @triton.jit
 def _attn_fwd_inner(
-    O_block,
+    o,
     l_i,
     m_i,
-    Q_block,
-    K_block_ptr,
-    V_block_ptr,
+    q,
+    k_block_ptr,
+    v_block_ptr,
     block_index_q,
     softmax_scale,
     BLOCK_SIZE_Q: tl.constexpr,
@@ -20,7 +20,27 @@ def _attn_fwd_inner(
     offs_kv: tl.constexpr,
     SEQ_LEN: tl.constexpr,
 ):
-    pass
+    for i in range(0, SEQ_LEN, BLOCK_SIZE_KV):
+        # Load one block at a time. Cannot load all of k (SEQ_LEN, HEAD_DIM) (too much memory for Shared memory) 
+        # -> Instead load (BLOCK_SIZE_KV, HEAD_DIM) at a time, and use the magic of online softmax!!
+        k = tl.load(k_block_ptr)
+        v = tl.load(v_block_ptr)
+        s_i = tl.dot(q, k)
+        s_i /= softmax_scale
+        row_max = tl.max(s_i, axis = 1)
+        m_i_1 = tl.maximum(m_i, row_max)
+        p_i = tl.exp(s_i - m_i_1)
+        l_i_1 = tl.sum(p_i, axis = 1) + l_i * tl.exp(m_i - m_i_1) # m_i_1 will be broadcasted from shape (BLOCK_SIZE_Q, ) to (BLOCK_SIZE_Q, BLOCK_SIZE_KV) to add with s_i
+        # Create diagonal matrix
+        product = tl.dot(p_i, v)
+        scale = tl.exp(m_i - m_i_1)
+        o = o * scale[:, None] + product # O has shape (BLOCK_SIZE_Q, HEAD_DIM)
+        k_block_ptr = tl.advance(k_block_ptr, (0, BLOCK_SIZE_KV))
+        v_block_ptr = tl.advance(v_block_ptr, (0, BLOCK_SIZE_KV))
+        l_i = l_i_1
+        m_i = m_i_1
+    return o, l_i, m_i
+
 
 @triton.jit
 def _attn_fwd(
@@ -28,7 +48,7 @@ def _attn_fwd(
     K,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM
     V,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM
     softmax_scale,
-    M,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN
+    L,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN
     O,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM
     stride_Q_batch,
     stride_Q_head,
@@ -86,72 +106,70 @@ def _attn_fwd(
         block_shape = (HEAD_DIM, BLOCK_SIZE_KV),
         order = (0, 1) # We want the first dimension to have contiguous elements in memory 
     )
-    k = tl.load(k_block_ptr)
-
 
     v_base_offset = idx_batch * stride_V_batch + idx_head * stride_V_head 
     v_block_ptr = tl.make_block_ptr(
         base = V + v_base_offset,
         shape = (SEQ_LEN, HEAD_DIM), # Transpose
-        strides = (stride_V_dim, stride_V_seq), 
+        strides = (stride_V_seq, stride_V_dim), 
         offsets = (0, 0),
         block_shape = (BLOCK_SIZE_KV, HEAD_DIM),
         order = (1, 0) # We want the first dimension to have contiguous elements in memory 
     )
-    v = tl.load(v_block_ptr)
 
     o_block_ptr = tl.make_block_ptr(
         base = O,
         shape = (SEQ_LEN, HEAD_DIM), # Transpose
-        strides = (stride_O_dim, stride_O_seq), 
+        strides = (stride_O_seq, stride_O_dim), 
         offsets = (idx_q_block * BLOCK_SIZE_Q, 0),
         block_shape = (BLOCK_SIZE_Q, HEAD_DIM),
         order = (1, 0) # We want the first dimension to have contiguous elements in memory 
     )
-    o = tl.load(v_block_ptr)
+    o = tl.zeros([BLOCK_SIZE_Q, HEAD_DIM], dtype=tl.float32)
+
+    l_i = tl.zeros((BLOCK_SIZE_Q, ), dtype=tl.float32)
+    m_i = tl.fill((BLOCK_SIZE_Q, ), float("-inf"), dtype=tl.float32)
 
     if STAGE == 1 or STAGE == 3:
         # This step runs for non-causal attention or for the blocks to the left of the diagonal in the causal attention
         O_block, l_i, m_i = _attn_fwd_inner(
-            O_block,
+            o,
             l_i,
             m_i,
             q,
-            k,
-            v,
+            k_block_ptr,
+            v_block_ptr,
             idx_q_block,
             softmax_scale,
             BLOCK_SIZE_Q,
             BLOCK_SIZE_KV,
             4 - STAGE,
-            offs_q,
-            offs_kv,
+            0, # offs_q ,
+            0, # offs_kv,
             SEQ_LEN,
         )
 
     if STAGE == 3:
         # This step runs for the blocks to the right of the diagonal in the causal attention
         O_block, l_i, m_i = _attn_fwd_inner(
-            O_block,
+            o,
             l_i,
             m_i,
             q,
-            k,
-            v,
+            k_block_ptr,
+            v_block_ptr,
             idx_q_block,
             softmax_scale,
             BLOCK_SIZE_Q,
             BLOCK_SIZE_KV,
             2,
-            offs_q,
-            offs_kv,
+            0, # offs_q,
+            0, # offs_kv,
             SEQ_LEN,
         )
     # epilogue
-    m_i += tl.math.log(
-        l_i
-    )  # This is needed to compute the logsumexp for the backwards pass
-    O_block = O_block / l_i[:, None]
-    m_ptrs = M + index_batch_head * SEQ_LEN + offs_q
-    tl.store(m_ptrs, m_i)
-    tl.store(O_block_ptr, O_block.to(O.type.element_ty))
+    L_i = m_i + tl.math.log(l_i)  # This is needed to compute the logsumexp for the backwards pass
+    O_block = O_block / l_i[:, None] # Divid each entry by the corresponding row element in l_i
+    l_ptrs = L + (idx_batch * NUM_HEADS + idx_head) * SEQ_LEN + BLOCK_SIZE_Q * idx_q_block + tl.arange(0, BLOCK_SIZE_Q) # One scalar L_i per query row
+    tl.store(l_ptrs, L_i)
+    tl.store(o_block_ptr, O_block.to(O.type.element_ty))

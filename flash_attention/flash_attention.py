@@ -51,19 +51,75 @@ class TritonAttention(torch.autograd.Function):
             BATCH_SIZE=Q.shape[0],
             NUM_HEADS=Q.shape[1],
             SEQ_LEN=Q.shape[2],
-            HEAD_DIM=HEAD_DIM_K,
+            HEAD_DIM=HEAD_DIM,
             STAGE=stage,
         )
 
         ctx.save_for_backward(Q, K, V, O, L)
         ctx.grid = grid
         ctx.softmax_scale = softmax_scale
-        ctx.HEAD_DIM = HEAD_DIM_K
+        ctx.HEAD_DIM = HEAD_DIM
         ctx.causal = causal
         return O
 
     def backward():
         pass
+
+def test_flash_attention_forward():
+    BATCH_SIZE = 2
+    NUM_HEADS = 4
+    SEQ_LEN = 32
+    HEAD_DIM = 16
+    dtype = torch.float16
+    causal = False
+
+    # Create random inputs
+    Q = (
+        torch.empty(
+            (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device="cuda"
+        )
+        .normal_(mean=0.0, std=0.5)
+        .requires_grad_()
+    )
+    K = (
+        torch.empty(
+            (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device="cuda"
+        )
+        .normal_(mean=0.0, std=0.5)
+        .requires_grad_()
+    )
+    V = (
+        torch.empty(
+            (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device="cuda"
+        )
+        .normal_(mean=0.0, std=0.5)
+        .requires_grad_()
+    )
+
+    softmax_scale = 1 / (HEAD_DIM**0.5)
+
+    # Compute reference output using PyTorch
+    Q_ = Q.to(torch.float32)
+    K_ = K.to(torch.float32)
+    V_ = V.to(torch.float32)
+    attn_weights = torch.matmul(Q_, K_.transpose(-2, -1)) / softmax_scale  # (B, H, L, L)
+    if causal:
+        mask = torch.tril(torch.ones(SEQ_LEN, SEQ_LEN, device=Q.device))
+        attn_weights = attn_weights.masked_fill(mask[None,None,:,:]==0, float('-inf'))
+    attn_probs = torch.softmax(attn_weights, dim=-1)
+    ref_output = torch.matmul(attn_probs, V_).to(dtype)
+    try:
+        tri_output = TritonAttention.apply(Q, K, V, causal, softmax_scale)
+        tri_output = tri_output.to(dtype)
+    except Exception as e:
+        print("Error running TritonAttention:", e)
+        return False
+
+    # Compare the outputs
+    max_diff = (ref_output - tri_output).abs().max().item()
+    print(f"Max difference between reference and flash attention: {max_diff:.6e}")
+    assert max_diff < 2e-2, f"Forward outputs do not match (max diff {max_diff})"
+    print("Test passed: forward outputs match within acceptable tolerance.")
 
 
 
