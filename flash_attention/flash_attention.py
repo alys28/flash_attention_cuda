@@ -6,14 +6,13 @@ from flash_attention.forward_kernel import _attn_fwd
 
 class TritonAttention(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, Q, K, V, causal, softmax_scale):
+    def forward(ctx, Q, K, V, softmax_scale, mask = None):
         # Asserts
         HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
         HEAD_DIM_V = V.shape[-1]
         BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
         assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
         O = torch.empty_like(Q)
-        stage = 3 if causal else 1
         grid = lambda args: (
             BATCH_SIZE, # dim 0: batch index
             NUM_HEADS, # dim 1: head index
@@ -24,7 +23,8 @@ class TritonAttention(torch.autograd.Function):
         L = torch.empty(
             (BATCH_SIZE, NUM_HEADS, SEQ_LEN), device=Q.device, dtype=torch.float32
         )
-
+        if mask:
+            assert mask.dim() == 4, "Mask must be 4-dimensional (batch, head, seq1, seq2)"
         _attn_fwd[grid](
             Q=Q,
             K=K,
@@ -52,14 +52,18 @@ class TritonAttention(torch.autograd.Function):
             NUM_HEADS=Q.shape[1],
             SEQ_LEN=Q.shape[2],
             HEAD_DIM=HEAD_DIM,
-            STAGE=stage,
+            IS_MASK = False if mask is None else True,
+            MASK=torch.zeros(1,1) if mask is None else mask,
+            stride_MASK_batch=mask.stride(0) if mask is not None else 0,
+            stride_MASK_head=mask.stride(1) if mask is not None else 0,
+            stride_MASK_seq1=mask.stride(2) if mask is not None else 0,
+            stride_MASK_seq2=mask.stride(3) if mask is not None else 0,
         )
 
-        ctx.save_for_backward(Q, K, V, O, L)
+        ctx.save_for_backward(Q, K, V, O, L, mask)
         ctx.grid = grid
         ctx.softmax_scale = softmax_scale
         ctx.HEAD_DIM = HEAD_DIM
-        ctx.causal = causal
         return O
 
     def backward():
@@ -109,7 +113,10 @@ def test_flash_attention_forward():
     attn_probs = torch.softmax(attn_weights, dim=-1)
     ref_output = torch.matmul(attn_probs, V_).to(dtype)
     try:
-        tri_output = TritonAttention.apply(Q, K, V, causal, softmax_scale)
+        mask = None
+        if causal:
+            mask = torch.tril(torch.ones(SEQ_LEN, SEQ_LEN, device=Q.device))
+        tri_output = TritonAttention.apply(Q, K, V, softmax_scale, mask)
         tri_output = tri_output.to(dtype)
     except Exception as e:
         print("Error running TritonAttention:", e)

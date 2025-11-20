@@ -19,6 +19,8 @@ def _attn_fwd_inner(
     offs_q: tl.constexpr,
     offs_kv: tl.constexpr,
     SEQ_LEN: tl.constexpr,
+    IS_MASK: tl.constexpr,
+    mask_block_ptr: tl.constexpr
 ):
     for i in range(0, SEQ_LEN, BLOCK_SIZE_KV):
         # Load one block at a time. Cannot load all of k (SEQ_LEN, HEAD_DIM) (too much memory for Shared memory) 
@@ -70,9 +72,14 @@ def _attn_fwd(
     NUM_HEADS: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    IS_MASK: tl.constexpr,
+    MASK: tl.constexpr,
+    stride_MASK_batch,
+    stride_MASK_head,
+    stride_MASK_seq1,
+    stride_MASK_seq2,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
-    STAGE: tl.constexpr,
 ):
     idx_batch = tl.program_id(0)
     idx_head = tl.program_id(1)
@@ -110,7 +117,7 @@ def _attn_fwd(
     v_base_offset = idx_batch * stride_V_batch + idx_head * stride_V_head 
     v_block_ptr = tl.make_block_ptr(
         base = V + v_base_offset,
-        shape = (SEQ_LEN, HEAD_DIM), # Transpose
+        shape = (SEQ_LEN, HEAD_DIM),
         strides = (stride_V_seq, stride_V_dim), 
         offsets = (0, 0),
         block_shape = (BLOCK_SIZE_KV, HEAD_DIM),
@@ -119,57 +126,53 @@ def _attn_fwd(
 
     o_block_ptr = tl.make_block_ptr(
         base = O,
-        shape = (SEQ_LEN, HEAD_DIM), # Transpose
+        shape = (SEQ_LEN, HEAD_DIM),
         strides = (stride_O_seq, stride_O_dim), 
         offsets = (idx_q_block * BLOCK_SIZE_Q, 0),
         block_shape = (BLOCK_SIZE_Q, HEAD_DIM),
         order = (1, 0) # We want the first dimension to have contiguous elements in memory 
     )
+
+    mask_offset = idx_batch * stride_MASK_batch + idx_head * stride_MASK_head
+    mask_block_ptr = tl.make_block_ptr(
+        base = MASK + mask_offset,
+        shape = (SEQ_LEN, SEQ_LEN),
+        strides = (stride_MASK_seq1, stride_MASK_seq2),
+        offsets = (idx_q_block * BLOCK_SIZE_Q, 0),
+        block_shape = (BLOCK_SIZE_Q, BLOCK_SIZE_KV),
+        order = (1,0)
+    )
+
     o = tl.zeros([BLOCK_SIZE_Q, HEAD_DIM], dtype=tl.float32)
 
     l_i = tl.zeros((BLOCK_SIZE_Q, ), dtype=tl.float32)
     m_i = tl.fill((BLOCK_SIZE_Q, ), float("-inf"), dtype=tl.float32)
+    # This step runs for non-causal attention or for the blocks to the left of the diagonal in the causal attention
+    O_block, l_i, m_i = _attn_fwd_inner(
+        o,
+        l_i,
+        m_i,
+        q,
+        k_block_ptr,
+        v_block_ptr,
+        idx_q_block,
+        softmax_scale,
+        BLOCK_SIZE_Q,
+        BLOCK_SIZE_KV,
+        0, # offs_q ,
+        0, # offs_kv,
+        SEQ_LEN,
+        IS_MASK,
+        mask_block_ptr
+    )
 
-    if STAGE == 1 or STAGE == 3:
-        # This step runs for non-causal attention or for the blocks to the left of the diagonal in the causal attention
-        O_block, l_i, m_i = _attn_fwd_inner(
-            o,
-            l_i,
-            m_i,
-            q,
-            k_block_ptr,
-            v_block_ptr,
-            idx_q_block,
-            softmax_scale,
-            BLOCK_SIZE_Q,
-            BLOCK_SIZE_KV,
-            4 - STAGE,
-            0, # offs_q ,
-            0, # offs_kv,
-            SEQ_LEN,
-        )
-
-    if STAGE == 3:
-        # This step runs for the blocks to the right of the diagonal in the causal attention
-        O_block, l_i, m_i = _attn_fwd_inner(
-            o,
-            l_i,
-            m_i,
-            q,
-            k_block_ptr,
-            v_block_ptr,
-            idx_q_block,
-            softmax_scale,
-            BLOCK_SIZE_Q,
-            BLOCK_SIZE_KV,
-            2,
-            0, # offs_q,
-            0, # offs_kv,
-            SEQ_LEN,
-        )
     # epilogue
     L_i = m_i + tl.math.log(l_i)  # This is needed to compute the logsumexp for the backwards pass
     O_block = O_block / l_i[:, None] # Divid each entry by the corresponding row element in l_i
+    # For l_ptrs indexing, we still view it as base + idx_batch * batch_stride + idx_head * head_stride + idx_q_block * q_stride
+    # batch_stride = NUM_HEADS * SEQ_LEN * 1 (From stride formula)
+    # head_stride = SEQ_LEN * 1
+    # q_stride = 1
     l_ptrs = L + (idx_batch * NUM_HEADS + idx_head) * SEQ_LEN + BLOCK_SIZE_Q * idx_q_block + tl.arange(0, BLOCK_SIZE_Q) # One scalar L_i per query row
     tl.store(l_ptrs, L_i)
     tl.store(o_block_ptr, O_block.to(O.type.element_ty))
