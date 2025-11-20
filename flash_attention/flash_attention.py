@@ -78,11 +78,11 @@ class TritonAttention(torch.autograd.Function):
 
 def test_flash_attention_forward():
     BATCH_SIZE = 1
-    NUM_HEADS = 1
-    SEQ_LEN = 4
-    HEAD_DIM = 2
+    NUM_HEADS = 1024
+    SEQ_LEN = 64
+    HEAD_DIM = 32
     dtype = torch.float32
-    causal = False 
+    causal = True 
     # Create random inputs
     Q = (
         torch.empty(
@@ -112,18 +112,36 @@ def test_flash_attention_forward():
     Q_ = Q.to(torch.float32)
     K_ = K.to(torch.float32)
     V_ = V.to(torch.float32)
-    attn_weights = torch.matmul(Q_, K_.transpose(-2, -1)) / softmax_scale  # (B, H, L, L)
+    attn_weights = torch.matmul(Q_, K_.transpose(-2, -1)) * softmax_scale  # (B, H, L, L)
     if causal:
         mask = torch.tril(torch.ones(BATCH_SIZE, NUM_HEADS, SEQ_LEN, SEQ_LEN, device=Q.device))
         attn_weights = attn_weights.masked_fill(mask[None,None,:,:]==0, float('-inf'))
-    attn_probs = torch.softmax(attn_weights, dim=-1)
+    # print("s_i (ground_truth): ", attn_weights)
+    # Step 1 — max for numerical stability
+    m = attn_weights.max(dim=-1, keepdim=True).values
+    # print("m_i (ground_truth): ", m)
+    # Step 2 — subtract max
+    shifted = attn_weights - m
+    # print("shifted:", shifted)
+
+    # Step 3 — exponentiate
+    exp_vals = shifted.exp()
+    # print("exp:", exp_vals)
+
+    # Step 4 — sum of exponentials
+    exp_sum = exp_vals.sum(dim=-1, keepdim=True)
+    prefix_sum = exp_vals.cumsum(dim=-1)
+    # print("l_i ground truth: ", exp_sum)
+    # Step 5 — divide
+    attn_probs = exp_vals / exp_sum
+    # print("softmax:", attn_probs)
     ref_output = torch.matmul(attn_probs, V_).to(dtype)
     mask = None
     if causal:
         mask = torch.tril(torch.ones(BATCH_SIZE, NUM_HEADS, SEQ_LEN, SEQ_LEN, device=Q.device))
     tri_output = TritonAttention.apply(Q, K, V, softmax_scale, mask)
     tri_output = tri_output.to(dtype)
-
+    print(tri_output)
     # Compare the outputs
     max_diff = (ref_output - tri_output).abs().max().item()
     print(f"Max difference between reference and flash attention: {max_diff:.6e}")
@@ -161,7 +179,7 @@ def compare(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, causal: bool, dtype = torc
 
     # softmax(QK^T / scale) * V
     causal_mask = torch.tril((SEQ_LEN, SEQ_LEN), device = 'cuda')
-    P = Q @ K.transpose(2, 3) / softmax_scale # (B, H, L, L)
+    P = Q @ K.transpose(2, 3) * softmax_scale # (B, H, L, L)
     if causal:
         P[:, :, causal_mask == 0] = float('-inf')
     P = torch.softmax(P, dim = 3).half()

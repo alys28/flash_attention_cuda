@@ -17,31 +17,29 @@ def _attn_fwd_inner(
     BLOCK_SIZE_KV: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     IS_MASK: tl.constexpr,
-    mask_block_ptr: tl.constexpr
+    mask_block_ptr
 ):
-    for i in range(0, SEQ_LEN, BLOCK_SIZE_KV):
+    for _ in range(0, SEQ_LEN, BLOCK_SIZE_KV):
         # Load one block at a time. Cannot load all of k (SEQ_LEN, HEAD_DIM) (too much memory for Shared memory) 
         # -> Instead load (BLOCK_SIZE_KV, HEAD_DIM) at a time, and use the magic of online softmax!!
-        k = tl.load(k_block_ptr)
-        v = tl.load(v_block_ptr)
+        k = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option='zero')
+        v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option='zero')
         s_i = tl.dot(q, k)
-        # s_i *= softmax_scale
+        s_i *= softmax_scale
         if IS_MASK:
-            mask = tl.load(mask_block_ptr)
+            mask = tl.load(mask_block_ptr, boundary_check=(0, 1), padding_option='zero')
             s_i += mask
             mask_block_ptr = tl.advance(mask_block_ptr, (0, BLOCK_SIZE_KV))
         row_max = tl.max(s_i, axis = 1)
         m_i_1 = tl.maximum(m_i, row_max)
-        print("m_i_1", m_i_1)
-        print("s_i", s_i)
-        p_i = tl.exp(s_i - m_i_1)
+        p_i = tl.exp(s_i - m_i_1[:, None])
         l_i_1 = tl.sum(p_i, axis = 1) + l_i * tl.exp(m_i - m_i_1) # m_i_1 will be broadcasted from shape (BLOCK_SIZE_Q, ) to (BLOCK_SIZE_Q, BLOCK_SIZE_KV) to add with s_i
         # Create diagonal matrix
         product = tl.dot(p_i, v)
         scale = tl.exp(m_i - m_i_1)
         o = o * scale[:, None] + product # O has shape (BLOCK_SIZE_Q, HEAD_DIM)
         k_block_ptr = tl.advance(k_block_ptr, (0, BLOCK_SIZE_KV))
-        v_block_ptr = tl.advance(v_block_ptr, (0, BLOCK_SIZE_KV))
+        v_block_ptr = tl.advance(v_block_ptr, (BLOCK_SIZE_KV, 0))
         l_i = l_i_1
         m_i = m_i_1
     return o, l_i, m_i
@@ -54,10 +52,10 @@ def _attn_fwd_inner(
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        for BLOCK_SIZE_Q in [4]
-        for BLOCK_SIZE_KV in [4]
-        for num_stages in ([3, 4, 7])
-        for num_warps in [2, 4]
+        for BLOCK_SIZE_Q in [32]
+        for BLOCK_SIZE_KV in [16]
+        for num_stages in ([4])
+        for num_warps in [2]
     ],
     key=["SEQ_LEN", "HEAD_DIM"],
 )
@@ -101,6 +99,7 @@ def _attn_fwd(
     idx_batch = tl.program_id(0)
     idx_head = tl.program_id(1)
     idx_q_block = tl.program_id(2)
+    # print("Batch: ", idx_batch, "Head: ", idx_head, "Q Block: ", idx_q_block)
     # We have to go the amount of strides to reach the corresponding block within the head
     q_base_offset = idx_batch * stride_Q_batch + idx_head * stride_Q_head # Get to the right batch, find the right head, you will have the sub matrix of shape (SEQ_LEN, HEAD_DIM)
     q_block_ptr = tl.make_block_ptr(
@@ -118,7 +117,7 @@ def _attn_fwd(
     # q_ptrs = q_base + offset_row[:, None] * stride_Q_seq + offset_col[None, :] * stride_Q_dim
     # mask = offset_row < SEQ_LEN
 
-    q = tl.load(q_block_ptr)
+    q = tl.load(q_block_ptr, boundary_check=(0, 1), padding_option='zero')
 
     # Load K
     k_base_offset = idx_batch * stride_K_batch + idx_head * stride_K_head 
@@ -141,8 +140,9 @@ def _attn_fwd(
         order = (1, 0) # We want the first dimension to have contiguous elements in memory 
     )
 
+    o_base_offset = idx_batch * stride_O_batch + idx_head * stride_O_head 
     o_block_ptr = tl.make_block_ptr(
-        base = O,
+        base = O + o_base_offset,
         shape = (SEQ_LEN, HEAD_DIM),
         strides = (stride_O_seq, stride_O_dim), 
         offsets = (idx_q_block * BLOCK_SIZE_Q, 0),
@@ -188,6 +188,9 @@ def _attn_fwd(
     # batch_stride = NUM_HEADS * SEQ_LEN * 1 (From stride formula)
     # head_stride = SEQ_LEN * 1
     # q_stride = 1
+    q_start = idx_q_block * BLOCK_SIZE_Q
+    q_offsets = q_start + tl.arange(0, BLOCK_SIZE_Q)
+    q_mask = q_offsets < SEQ_LEN
     l_ptrs = L + (idx_batch * NUM_HEADS + idx_head) * SEQ_LEN + BLOCK_SIZE_Q * idx_q_block + tl.arange(0, BLOCK_SIZE_Q) # One scalar L_i per query row
-    tl.store(l_ptrs, L_i)
-    tl.store(o_block_ptr, O_block.to(O.type.element_ty))
+    # tl.store(l_ptrs, L_i, mask=q_mask)
+    tl.store(o_block_ptr, O_block.to(O.type.element_ty), boundary_check=(0, 1))
