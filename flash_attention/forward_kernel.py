@@ -25,14 +25,14 @@ def _attn_fwd_inner(
     for i in range(0, SEQ_LEN, BLOCK_SIZE_KV):
         # Load one block at a time. Cannot load all of k (SEQ_LEN, HEAD_DIM) (too much memory for Shared memory) 
         # -> Instead load (BLOCK_SIZE_KV, HEAD_DIM) at a time, and use the magic of online softmax!!
-        mask = tl.load(mask_block_ptr)
         k = tl.load(k_block_ptr)
         v = tl.load(v_block_ptr)
         s_i = tl.dot(q, k)
         s_i /= softmax_scale
         if IS_MASK:
+            mask = tl.load(mask_block_ptr)
             s_i += mask
-            mask = tl.advance(mask_block_ptr, (0, BLOCK_SIZE_KV))
+            mask_block_ptr = tl.advance(mask_block_ptr, (0, BLOCK_SIZE_KV))
         row_max = tl.max(s_i, axis = 1)
         m_i_1 = tl.maximum(m_i, row_max)
         p_i = tl.exp(s_i - m_i_1)
@@ -47,7 +47,20 @@ def _attn_fwd_inner(
         m_i = m_i_1
     return o, l_i, m_i
 
-
+@triton.autotune(
+    [
+        triton.Config(
+            {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
+            num_stages=num_stages,
+            num_warps=num_warps,
+        )
+        for BLOCK_SIZE_Q in [64, 128]
+        for BLOCK_SIZE_KV in [32, 64]
+        for num_stages in ([3, 4, 7])
+        for num_warps in [2, 4]
+    ],
+    key=["SEQ_LEN", "HEAD_DIM"],
+)
 @triton.jit
 def _attn_fwd(
     Q,  # BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM
