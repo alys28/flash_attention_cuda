@@ -15,9 +15,6 @@ def _attn_fwd_inner(
     softmax_scale,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
-    STAGE: tl.constexpr,
-    offs_q: tl.constexpr,
-    offs_kv: tl.constexpr,
     SEQ_LEN: tl.constexpr,
     IS_MASK: tl.constexpr,
     mask_block_ptr: tl.constexpr
@@ -28,13 +25,15 @@ def _attn_fwd_inner(
         k = tl.load(k_block_ptr)
         v = tl.load(v_block_ptr)
         s_i = tl.dot(q, k)
-        s_i /= softmax_scale
+        # s_i *= softmax_scale
         if IS_MASK:
             mask = tl.load(mask_block_ptr)
             s_i += mask
             mask_block_ptr = tl.advance(mask_block_ptr, (0, BLOCK_SIZE_KV))
         row_max = tl.max(s_i, axis = 1)
         m_i_1 = tl.maximum(m_i, row_max)
+        print("m_i_1", m_i_1)
+        print("s_i", s_i)
         p_i = tl.exp(s_i - m_i_1)
         l_i_1 = tl.sum(p_i, axis = 1) + l_i * tl.exp(m_i - m_i_1) # m_i_1 will be broadcasted from shape (BLOCK_SIZE_Q, ) to (BLOCK_SIZE_Q, BLOCK_SIZE_KV) to add with s_i
         # Create diagonal matrix
@@ -47,6 +46,7 @@ def _attn_fwd_inner(
         m_i = m_i_1
     return o, l_i, m_i
 
+
 @triton.autotune(
     [
         triton.Config(
@@ -54,8 +54,8 @@ def _attn_fwd_inner(
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        for BLOCK_SIZE_Q in [64, 128]
-        for BLOCK_SIZE_KV in [32, 64]
+        for BLOCK_SIZE_Q in [4]
+        for BLOCK_SIZE_KV in [4]
         for num_stages in ([3, 4, 7])
         for num_warps in [2, 4]
     ],
@@ -90,7 +90,7 @@ def _attn_fwd(
     SEQ_LEN: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     IS_MASK: tl.constexpr,
-    MASK: tl.constexpr,
+    MASK,
     stride_MASK_batch,
     stride_MASK_head,
     stride_MASK_seq1,
@@ -163,7 +163,7 @@ def _attn_fwd(
     o = tl.zeros([BLOCK_SIZE_Q, HEAD_DIM], dtype=tl.float32)
 
     l_i = tl.zeros((BLOCK_SIZE_Q, ), dtype=tl.float32)
-    m_i = tl.fill((BLOCK_SIZE_Q, ), float("-inf"), dtype=tl.float32)
+    m_i = tl.full((BLOCK_SIZE_Q, ), float("-inf"), dtype=tl.float32)
     # This step runs for non-causal attention or for the blocks to the left of the diagonal in the causal attention
     O_block, l_i, m_i = _attn_fwd_inner(
         o,
@@ -176,8 +176,6 @@ def _attn_fwd(
         softmax_scale,
         BLOCK_SIZE_Q,
         BLOCK_SIZE_KV,
-        0, # offs_q ,
-        0, # offs_kv,
         SEQ_LEN,
         IS_MASK,
         mask_block_ptr
@@ -185,7 +183,7 @@ def _attn_fwd(
 
     # epilogue
     L_i = m_i + tl.math.log(l_i)  # This is needed to compute the logsumexp for the backwards pass
-    O_block = O_block / l_i[:, None] # Divid each entry by the corresponding row element in l_i
+    O_block = O_block / l_i[:, None] # Divide each entry by the corresponding row element in l_i
     # For l_ptrs indexing, we still view it as base + idx_batch * batch_stride + idx_head * head_stride + idx_q_block * q_stride
     # batch_stride = NUM_HEADS * SEQ_LEN * 1 (From stride formula)
     # head_stride = SEQ_LEN * 1

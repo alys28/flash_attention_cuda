@@ -23,13 +23,15 @@ class TritonAttention(torch.autograd.Function):
         L = torch.empty(
             (BATCH_SIZE, NUM_HEADS, SEQ_LEN), device=Q.device, dtype=torch.float32
         )
-        if mask:
+        if mask is not None:
             assert mask.dim() == 4, "Mask must be 4-dimensional (batch, head, seq1, seq2)"
             # Convert mask from {0,1} (or boolean) to {0, -inf} additive mask
             # If mask is boolean, convert True->0, False->-inf. If mask is 0/1, same logic applies.
             mask_inf = torch.zeros_like(mask, dtype=torch.float32)
             mask_inf[~mask.bool()] = float("-inf")
             mask = mask_inf
+        else:
+            dummy_mask = torch.zeros((BATCH_SIZE, NUM_HEADS, SEQ_LEN, SEQ_LEN), device=Q.device, dtype=torch.float32)
         _attn_fwd[grid](
             Q=Q,
             K=K,
@@ -58,7 +60,7 @@ class TritonAttention(torch.autograd.Function):
             SEQ_LEN=Q.shape[2],
             HEAD_DIM=HEAD_DIM,
             IS_MASK = False if mask is None else True,
-            MASK=torch.zeros(1,1) if mask is None else mask,
+            MASK=dummy_mask if mask is None else mask,
             stride_MASK_batch=mask.stride(0) if mask is not None else 0,
             stride_MASK_head=mask.stride(1) if mask is not None else 0,
             stride_MASK_seq1=mask.stride(2) if mask is not None else 0,
@@ -75,12 +77,12 @@ class TritonAttention(torch.autograd.Function):
         pass
 
 def test_flash_attention_forward():
-    BATCH_SIZE = 2
-    NUM_HEADS = 4
-    SEQ_LEN = 32
-    HEAD_DIM = 16
-    dtype = torch.float16
-    causal = False
+    BATCH_SIZE = 1
+    NUM_HEADS = 1
+    SEQ_LEN = 4
+    HEAD_DIM = 2
+    dtype = torch.float32
+    causal = False 
     # Create random inputs
     Q = (
         torch.empty(
@@ -112,19 +114,15 @@ def test_flash_attention_forward():
     V_ = V.to(torch.float32)
     attn_weights = torch.matmul(Q_, K_.transpose(-2, -1)) / softmax_scale  # (B, H, L, L)
     if causal:
-        mask = torch.tril(torch.ones(SEQ_LEN, SEQ_LEN, device=Q.device))
+        mask = torch.tril(torch.ones(BATCH_SIZE, NUM_HEADS, SEQ_LEN, SEQ_LEN, device=Q.device))
         attn_weights = attn_weights.masked_fill(mask[None,None,:,:]==0, float('-inf'))
     attn_probs = torch.softmax(attn_weights, dim=-1)
     ref_output = torch.matmul(attn_probs, V_).to(dtype)
-    try:
-        mask = None
-        if causal:
-            mask = torch.tril(torch.ones(SEQ_LEN, SEQ_LEN, device=Q.device))
-        tri_output = TritonAttention.apply(Q, K, V, softmax_scale, mask)
-        tri_output = tri_output.to(dtype)
-    except Exception as e:
-        print("Error running TritonAttention:", e)
-        return False
+    mask = None
+    if causal:
+        mask = torch.tril(torch.ones(BATCH_SIZE, NUM_HEADS, SEQ_LEN, SEQ_LEN, device=Q.device))
+    tri_output = TritonAttention.apply(Q, K, V, softmax_scale, mask)
+    tri_output = tri_output.to(dtype)
 
     # Compare the outputs
     max_diff = (ref_output - tri_output).abs().max().item()
@@ -135,7 +133,7 @@ def test_flash_attention_forward():
 
 
 
-def compare(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, causal: bool, dtype = torch.float16):
+def compare(BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM, causal: bool, dtype = torch.float32):
     Q = (
         torch.empty(
             (BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM), dtype=dtype, device="cuda"
