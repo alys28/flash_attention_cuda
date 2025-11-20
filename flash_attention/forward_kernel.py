@@ -25,10 +25,14 @@ def _attn_fwd_inner(
     for i in range(0, SEQ_LEN, BLOCK_SIZE_KV):
         # Load one block at a time. Cannot load all of k (SEQ_LEN, HEAD_DIM) (too much memory for Shared memory) 
         # -> Instead load (BLOCK_SIZE_KV, HEAD_DIM) at a time, and use the magic of online softmax!!
+        mask = tl.load(mask_block_ptr)
         k = tl.load(k_block_ptr)
         v = tl.load(v_block_ptr)
         s_i = tl.dot(q, k)
         s_i /= softmax_scale
+        if IS_MASK:
+            s_i += mask
+            mask = tl.advance(mask_block_ptr, (0, BLOCK_SIZE_KV))
         row_max = tl.max(s_i, axis = 1)
         m_i_1 = tl.maximum(m_i, row_max)
         p_i = tl.exp(s_i - m_i_1)

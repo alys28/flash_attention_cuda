@@ -25,6 +25,11 @@ class TritonAttention(torch.autograd.Function):
         )
         if mask:
             assert mask.dim() == 4, "Mask must be 4-dimensional (batch, head, seq1, seq2)"
+            # Convert mask from {0,1} (or boolean) to {0, -inf} additive mask
+             # If mask is boolean, convert True->0, False->-inf. If mask is 0/1, same logic applies.
+            mask_inf = torch.zeros_like(mask, dtype=torch.float32)
+            mask_inf[~mask.bool()] = float("-inf")
+            mask = mask_inf
         _attn_fwd[grid](
             Q=Q,
             K=K,
