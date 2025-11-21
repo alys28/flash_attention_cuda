@@ -19,17 +19,25 @@ def _attn_fwd_inner(
     IS_MASK: tl.constexpr,
     mask_block_ptr
 ):
-    for _ in range(0, SEQ_LEN, BLOCK_SIZE_KV):
+    for kv_block_start in range(0, SEQ_LEN, BLOCK_SIZE_KV):
         # Load one block at a time. Cannot load all of k (SEQ_LEN, HEAD_DIM) (too much memory for Shared memory) 
         # -> Instead load (BLOCK_SIZE_KV, HEAD_DIM) at a time, and use the magic of online softmax!!
         k = tl.load(k_block_ptr, boundary_check=(0, 1), padding_option='zero')
         v = tl.load(v_block_ptr, boundary_check=(0, 1), padding_option='zero')
         s_i = tl.dot(q, k)
         s_i *= softmax_scale
+        
+        # Mask out invalid K/V positions (when BLOCK_SIZE_KV > remaining sequence length)
+        kv_positions = kv_block_start + tl.arange(0, BLOCK_SIZE_KV)
+        kv_valid_mask = kv_positions < SEQ_LEN  # Shape: (BLOCK_SIZE_KV,)
+        # Broadcast to (BLOCK_SIZE_Q, BLOCK_SIZE_KV) and set invalid positions to -inf
+        s_i = tl.where(kv_valid_mask[None, :], s_i, float("-inf"))
+        
         if IS_MASK:
             mask = tl.load(mask_block_ptr, boundary_check=(0, 1), padding_option='zero')
             s_i += mask
             mask_block_ptr = tl.advance(mask_block_ptr, (0, BLOCK_SIZE_KV))
+        # print("s_i: ", s_i)
         row_max = tl.max(s_i, axis = 1)
         m_i_1 = tl.maximum(m_i, row_max)
         p_i = tl.exp(s_i - m_i_1[:, None])
@@ -52,8 +60,8 @@ def _attn_fwd_inner(
             num_stages=num_stages,
             num_warps=num_warps,
         )
-        for BLOCK_SIZE_Q in [32]
-        for BLOCK_SIZE_KV in [16]
+        for BLOCK_SIZE_Q in [16]
+        for BLOCK_SIZE_KV in [16]  # Must be >= 16 for tl.dot to work
         for num_stages in ([4])
         for num_warps in [2]
     ],

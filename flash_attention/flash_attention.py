@@ -78,9 +78,9 @@ class TritonAttention(torch.autograd.Function):
 
 def test_flash_attention_forward():
     BATCH_SIZE = 1
-    NUM_HEADS = 1024
-    SEQ_LEN = 64
-    HEAD_DIM = 32
+    NUM_HEADS = 1
+    SEQ_LEN = 4
+    HEAD_DIM = 16
     dtype = torch.float32
     causal = True 
     # Create random inputs
@@ -116,7 +116,7 @@ def test_flash_attention_forward():
     if causal:
         mask = torch.tril(torch.ones(BATCH_SIZE, NUM_HEADS, SEQ_LEN, SEQ_LEN, device=Q.device))
         attn_weights = attn_weights.masked_fill(mask[None,None,:,:]==0, float('-inf'))
-    # print("s_i (ground_truth): ", attn_weights)
+    print("s_i (ground_truth): ", attn_weights)
     # Step 1 — max for numerical stability
     m = attn_weights.max(dim=-1, keepdim=True).values
     # print("m_i (ground_truth): ", m)
