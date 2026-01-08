@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from flash_attention.forward_kernel import _attn_fwd
-
+from flash_attention.backward_kernel import _attn_bwd_preprocess
 
 class TritonAttention(torch.autograd.Function):
     @staticmethod
@@ -73,8 +73,31 @@ class TritonAttention(torch.autograd.Function):
         ctx.HEAD_DIM = HEAD_DIM
         return O
 
-    def backward():
-        pass
+    def backward(ctx, dO):
+        Q, K, V, O, L, mask = ctx.saved_tensors
+
+        # Since we are taking the gradient wrt a scalar, dX := dL/dX will always have the same shape as X
+        dQ = torch.empty_like(Q)
+        dK = torch.empty_like(K)
+        dV = torch.empty_like(V)
+
+        BATCH_SIZE, NUM_HEADS, SEQ_LEN = Q.shape[:3]
+        NUM_WARPS, NUM_STAGES = 4, 3
+        BLOCK_SIZE_MICRO, BLOCK_SIZE_MACRO = 32, 128
+        
+        preprocess_grid = (SEQ_LEN // BLOCK_SIZE_MACRO, BATCH_SIZE * NUM_HEADS)
+        D = torch.empty_like(L)  # (BATCH_SIZE, NUM_HEADS, SEQ_LEN)
+
+        # Compute all the elements Di
+        _attn_bwd_preprocess[preprocess_grid](
+            O=O,
+            dO=dO,
+            D=D,
+            SEQ_LEN=SEQ_LEN,
+            BLOCK_SIZE_Q=BLOCK_SIZE_MACRO,
+            HEAD_DIM=ctx.HEAD_DIM,
+        )
+        
 
 def test_flash_attention_forward():
     BATCH_SIZE = 1

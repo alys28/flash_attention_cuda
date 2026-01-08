@@ -200,5 +200,5 @@ def _attn_fwd(
     q_offsets = q_start + tl.arange(0, BLOCK_SIZE_Q)
     q_mask = q_offsets < SEQ_LEN
     l_ptrs = L + (idx_batch * NUM_HEADS + idx_head) * SEQ_LEN + BLOCK_SIZE_Q * idx_q_block + tl.arange(0, BLOCK_SIZE_Q) # One scalar L_i per query row
-    # tl.store(l_ptrs, L_i, mask=q_mask)
+    tl.store(l_ptrs, L_i, mask=q_mask)
     tl.store(o_block_ptr, O_block.to(O.type.element_ty), boundary_check=(0, 1))
