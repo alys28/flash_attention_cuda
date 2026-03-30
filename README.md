@@ -1,6 +1,6 @@
-# Flash Attention (Triton, WIP)
+# Flash Attention (Triton)
 
-This repository contains a work-in-progress implementation of Flash Attention using Triton kernels.
+This repository contains an implementation of Flash Attention using Triton kernels.
 It is currently focused on learning and experimentation, not production use.
 
 ## What is implemented
@@ -19,7 +19,7 @@ It is currently focused on learning and experimentation, not production use.
 
 - `flash_attention/flash_attention.py`: Autograd wrapper (`TritonAttention`) and a forward test entrypoint.
 - `flash_attention/forward_kernel.py`: Triton forward kernels.
-- `flash_attention/backward_kernel.py`: Backward preprocessing kernel (partial work).
+- `flash_attention/backward_kernel.py`: Backward preprocessing kernel
 - `CUDA_kernel_examples/`: Standalone CUDA learning examples.
 - `Triton_examples/`: Standalone Triton learning notebook(s).
 
@@ -69,5 +69,5 @@ The script compares Triton output to a PyTorch reference and asserts that the ma
 
 - Inputs are expected in `(batch, heads, seq_len, head_dim)` layout.
 - `Q`, `K`, and `V` must use the same `head_dim`.
-- Calling `.backward()` through `TritonAttention` is not fully supported yet.
 - This codebase is actively evolving; API and kernel details may change.
+- Future add-on: RoPE embeddings
