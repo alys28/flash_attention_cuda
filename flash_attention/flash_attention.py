@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from flash_attention.forward_kernel import _attn_fwd
-from flash_attention.backward_kernel import _attn_bwd_preprocess
+from flash_attention.backward_kernel import _attn_bwd_preprocess, _attn_bwd_dk_dv, _attn_bwd_dq
 
 class TritonAttention(torch.autograd.Function):
     @staticmethod
@@ -97,8 +97,72 @@ class TritonAttention(torch.autograd.Function):
             BLOCK_SIZE_Q=BLOCK_SIZE_MACRO,
             HEAD_DIM=ctx.HEAD_DIM,
         )
-        
+        if mask is not None:
+            dummy_mask = torch.zeros((BATCH_SIZE, NUM_HEADS, SEQ_LEN, SEQ_LEN), device=Q.device, dtype=torch.float32)
 
+        grid = (SEQ_LEN // BLOCK_SIZE_MICRO, BATCH_SIZE * NUM_HEADS)
+
+        _attn_bwd_dk_dv[grid](
+            Q=Q,
+            K=K,
+            V=V,
+            softmax_scale=ctx.softmax_scale,
+            dO=dO,
+            dQ=dQ,
+            dK=dK,
+            dV=dV,
+            L=L,
+            D=D,
+            stride_batch=Q.stride(0),
+            stride_head=Q.stride(1),
+            stride_seq=Q.stride(2),
+            stride_dim=Q.stride(3),
+            NUM_HEADS=NUM_HEADS,
+            SEQ_LEN=SEQ_LEN,
+            BLOCK_Q=BLOCK_SIZE_MICRO,
+            BLOCK_KV=BLOCK_SIZE_MACRO,
+            HEAD_DIM=ctx.HEAD_DIM,
+            num_warps=NUM_WARPS,
+            num_stages=NUM_STAGES,
+            IS_MASK = False if mask is None else True,
+            MASK=dummy_mask if mask is None else mask,
+            stride_MASK_batch=mask.stride(0) if mask is not None else 0,
+            stride_MASK_head=mask.stride(1) if mask is not None else 0,
+            stride_MASK_seq1=mask.stride(2) if mask is not None else 0,
+            stride_MASK_seq2=mask.stride(3) if mask is not None else 0,
+        )
+
+        _attn_bwd_dq[grid](
+            Q=Q,
+            K=K,
+            V=V,
+            softmax_scale=ctx.softmax_scale,
+            dO=dO,
+            dQ=dQ,
+            dK=dK,
+            dV=dV,
+            L=L,
+            D=D,
+            stride_batch=Q.stride(0),
+            stride_head=Q.stride(1),
+            stride_seq=Q.stride(2),
+            stride_dim=Q.stride(3),
+            NUM_HEADS=NUM_HEADS,
+            SEQ_LEN=SEQ_LEN,
+            BLOCK_Q=BLOCK_SIZE_MICRO,
+            BLOCK_KV=BLOCK_SIZE_MACRO,
+            HEAD_DIM=ctx.HEAD_DIM,
+            num_warps=NUM_WARPS,
+            num_stages=NUM_STAGES,
+            IS_MASK = False if mask is None else True,
+            MASK=dummy_mask if mask is None else mask,
+            stride_MASK_batch=mask.stride(0) if mask is not None else 0,
+            stride_MASK_head=mask.stride(1) if mask is not None else 0,
+            stride_MASK_seq1=mask.stride(2) if mask is not None else 0,
+            stride_MASK_seq2=mask.stride(3) if mask is not None else 0,
+        )
+        
+        return dQ, dK, dV, None, None
 def test_flash_attention_forward():
     BATCH_SIZE = 1
     NUM_HEADS = 1
