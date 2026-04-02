@@ -5,15 +5,9 @@ It is currently focused on learning and experimentation, not production use.
 
 ## What is implemented
 
-- Forward pass kernel in Triton with online softmax accumulation.
+- Forward + backward pass kernel in Triton with online softmax accumulation.
 - Optional attention mask support (`bool` or `0/1` inputs converted to additive `0/-inf`).
 - A forward correctness check against a PyTorch reference implementation.
-
-## What is not implemented yet
-
-- Full backward pass for `TritonAttention` (only a preprocessing kernel scaffold exists).
-- Packaging/installation metadata (`setup.py` / `pyproject.toml`).
-- Benchmarks and broad shape/dtype coverage.
 
 ## Repository layout
 
