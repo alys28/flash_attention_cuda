@@ -1,6 +1,6 @@
 # Flash Attention (Triton)
 
-This repository contains an implementation of Flash Attention using Triton kernels.
+This repository contains an implementation of Flash Attention using Triton kernels (implemented by hand, no AI).
 It is currently focused on learning and experimentation, not production use.
 
 ## What is implemented
